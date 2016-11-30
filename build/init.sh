@@ -13,6 +13,5 @@ cmake \
     ..
 
 echo "============================================================"
-echo "Make a symlink or copy libneat.so.0 from the neat directory"
-echo "Example: ln -s ~/path/to/neat/libneat.so.0 ."
+echo "Make a symlinks as specified in the README"
 echo "============================================================"
