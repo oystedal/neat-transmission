@@ -62,7 +62,8 @@ UTP_RBDrained (struct UTPSocket *socket)
     assert (0); /* FIXME: this is too much for the long term, but probably needed in the short term */
 }
 
-bool
+// OYSTEDAL: libutp malicously defines bool to be uint8
+/*bool*/uint8
 UTP_Write (struct UTPSocket *socket, size_t count)
 {
     tr_logAddNamedError (MY_NAME, "UTP_RBDrained (%p, %zu) was called.", socket, count);

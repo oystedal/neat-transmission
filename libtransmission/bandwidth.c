@@ -206,7 +206,7 @@ phaseOne (tr_ptrArray * peerArray, tr_direction dir)
    * small chunk of bandwidth. Keep looping until we run out of bandwidth
    * and/or peers that can use it */
   n = peerCount;
-  dbgmsg ("%d peers to go round-robin for %s", n, (dir==TR_UP?"upload":"download"));
+  // dbgmsg ("%d peers to go round-robin for %s", n, (dir==TR_UP?"upload":"download"));
   while (n > 0)
     {
       const int i = tr_rand_int_weak (n); /* pick a peer at random */
@@ -218,7 +218,7 @@ phaseOne (tr_ptrArray * peerArray, tr_direction dir)
 
       const int bytesUsed = tr_peerIoFlush (peers[i], dir, increment);
 
-      dbgmsg ("peer #%d of %d used %d bytes in this pass", i, n, bytesUsed);
+      // dbgmsg ("peer #%d of %d used %d bytes in this pass", i, n, bytesUsed);
 
       if (bytesUsed != (int)increment)
         {

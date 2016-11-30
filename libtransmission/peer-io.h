@@ -24,6 +24,8 @@
 #include "net.h" /* tr_address */
 #include "utils.h" /* tr_time () */
 
+#include "neat.h"
+
 struct evbuffer;
 struct tr_bandwidth;
 struct tr_datatype;
@@ -110,6 +112,9 @@ typedef struct tr_peerIo
 
     struct event        * event_read;
     struct event        * event_write;
+
+    struct neat_flow * flow;
+    int connected;
 }
 tr_peerIo;
 
@@ -132,6 +137,12 @@ tr_peerIo*  tr_peerIoNewIncoming (tr_session              * session,
                                   tr_port                   port,
                                   tr_socket_t               socket,
                                   struct UTPSocket *        utp_socket);
+
+tr_peerIo*
+tr_peerIoNewIncomingNEAT (tr_session        * session,
+                      tr_bandwidth      * parent,
+                      tr_address *addr,
+                      struct neat_flow *flow);
 
 void tr_peerIoRefImpl            (const char              * file,
                                   int                       line,

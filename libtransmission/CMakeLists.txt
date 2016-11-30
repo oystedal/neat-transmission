@@ -164,9 +164,9 @@ set(${PROJECT_NAME}_PRIVATE_HEADERS
     webseed.h
 )
 
-if(NOT ENABLE_UTP)
-    set_source_files_properties(tr-utp.c PROPERTIES HEADER_FILE_ONLY ON)
-endif()
+# if(NOT ENABLE_UTP)
+#     set_source_files_properties(tr-utp.c PROPERTIES HEADER_FILE_ONLY ON)
+# endif()
 
 add_definitions(
     -D__TRANSMISSION__
@@ -216,15 +216,16 @@ include_directories(
     ${DHT_INCLUDE_DIRS}
     ${UTP_INCLUDE_DIRS}
     ${B64_INCLUDE_DIRS}
+    ../third-party/libneat
 )
 
 if(ICONV_FOUND)
     include_directories(${ICONV_INCLUDE_DIRS})
 endif()
 
-if(ENABLE_UTP)
-    include_directories(${TP_TOP}/libutp)
-endif()
+# if(ENABLE_UTP)
+    include_directories(../third-party/)
+# endif()
 
 add_library(${TR_NAME} STATIC
     ${${PROJECT_NAME}_SOURCES}
@@ -241,6 +242,8 @@ foreach(UT ${EVENT2_UPSTREAM_TARGET}
     add_dependencies(${TR_NAME} ${UT})
 endforeach()
 
+LINK_DIRECTORIES(${CMAKE_SOURCE_DIR}/third-party/libneat)
+
 target_link_libraries(${TR_NAME}
     ${CMAKE_THREAD_LIBS_INIT}
     ${ZLIB_LIBRARIES}
@@ -254,6 +257,7 @@ target_link_libraries(${TR_NAME}
     ${B64_LIBRARIES}
     ${LIBINTL_LIBRARY}
     ${LIBM_LIBRARY}
+    neat
 )
 
 if(ICONV_FOUND)

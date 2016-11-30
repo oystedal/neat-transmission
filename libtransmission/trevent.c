@@ -31,6 +31,7 @@
 #include "trevent.h"
 #include "utils.h"
 
+#include "neat.h"
 
 #ifdef _WIN32
 
@@ -249,9 +250,27 @@ libeventThreadFunc (void * veh)
     event_add (eh->pipeEvent, NULL);
     event_set_log_callback (logFunc);
 
+#if 0
     /* loop until all the events are done */
     while (!eh->die)
         event_base_dispatch (base);
+#else
+    // OYSTEDAL: Run NEAT and libevent in tandem
+    /* loop until all the events are done */
+    while (!eh->die) {
+        event_base_loop (base, EVLOOP_NONBLOCK);
+
+        if (eh->session->neat_ctx)
+            break;
+    }
+
+    while (!eh->die) {
+        event_base_loop (base, EVLOOP_NONBLOCK);
+        neat_start_event_loop(eh->session->neat_ctx, NEAT_RUN_NOWAIT);
+    }
+#endif
+
+    // neat_free_ctx(ctx);
 
     /* shut down the thread */
     tr_lockFree (eh->lock);
@@ -259,6 +278,7 @@ libeventThreadFunc (void * veh)
     eh->session->events = NULL;
     tr_free (eh);
     tr_logAddDebug ("Closing libevent thread");
+    sleep(5);
 }
 
 void

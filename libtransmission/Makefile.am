@@ -1,7 +1,12 @@
 AM_CPPFLAGS = \
   -I$(top_srcdir) \
+  -I$(top_srcdir)/third-party/libneat \
+  -L$(top_srcdir)/third-party/libneat \
   -D__TRANSMISSION__ \
   -DPACKAGE_DATA_DIR=\""$(datadir)"\"
+
+AM_LDFLAGS = -lneat-static -L$(top_srcdir)/third-party/libneat
+
 
 AM_CFLAGS = \
   @DHT_CFLAGS@ \
@@ -203,6 +208,7 @@ noinst_PROGRAMS = $(TESTS)
 
 apps_ldadd = \
   ./libtransmission.a  \
+  -lneat \
   @LIBUPNP_LIBS@ \
   @LIBNATPMP_LIBS@ \
   @INTLLIBS@ \

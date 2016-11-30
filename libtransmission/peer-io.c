@@ -27,6 +27,7 @@
 #include "tr-utp.h"
 #include "utils.h"
 
+#include "neat.h"
 
 #ifdef _WIN32
  #undef  EAGAIN
@@ -42,6 +43,8 @@
 /* The amount of read bufferring that we allow for uTP sockets. */
 
 #define UTP_READ_BUFFER_SIZE (256 * 1024)
+
+static int tr_peerIoTryWrite (tr_peerIo * io, size_t howmuch);
 
 static size_t
 guessPacketOverhead (size_t d)
@@ -153,7 +156,6 @@ didWriteWrapper (tr_peerIo * io, unsigned int bytes_transferred)
      while (bytes_transferred && tr_isPeerIo (io))
      {
         struct tr_datatype * next = io->outbuf_datatypes;
-
         const unsigned int payload = MIN (next->length, bytes_transferred);
         /* For uTP sockets, the overhead is computed in utp_on_overhead. */
         const unsigned int overhead =
@@ -451,11 +453,10 @@ utp_get_rb_size (void *closure)
     return UTP_READ_BUFFER_SIZE - bytes;
 }
 
-static int tr_peerIoTryWrite (tr_peerIo * io, size_t howmuch);
-
 static void
 utp_on_writable (tr_peerIo *io)
 {
+    assert(0);
     int n;
 
     dbgmsg (io, "libutp says this peer is ready to write");
@@ -580,6 +581,95 @@ static struct UTPFunctionTable dummy_utp_function_table = {
 
 #endif /* #ifdef WITH_UTP */
 
+static neat_error_code
+on_error(struct neat_flow_operations *opCB)
+{
+    struct tr_peerIo *io = opCB->userData;
+    assert (tr_isPeerIo (io));
+
+    opCB->on_readable = NULL;
+    opCB->on_writable = NULL;
+    neat_set_operations(opCB->ctx, opCB->flow, opCB);
+
+    // dbgmsg (io, "utp_on_error -- errcode is %d", errcode);
+
+    if (io->gotError) {
+        // OYSTEDAL: Just needed a weird errno to distinguish this case
+        errno = EUCLEAN;
+        io->gotError (io, BEV_EVENT_ERROR, io->userData);
+    }
+
+    return NEAT_OK;
+}
+
+static neat_error_code
+on_readable(struct neat_flow_operations *opCB)
+{
+    static char buffer[4096*100];
+    int rc;
+    struct tr_peerIo *io = opCB->userData;
+    assert (tr_isPeerIo (io));
+    uint32_t actual = 0;
+
+    if ((io->pendingEvents & EV_READ) == 0)
+        return NEAT_OK;
+
+    io->pendingEvents &= ~EV_READ;
+
+    neat_error_code err = neat_read(opCB->ctx, opCB->flow, buffer, sizeof(buffer), &actual, NULL, 0);
+
+    if (err != NEAT_ERROR_OK)
+        return err;
+
+    rc = evbuffer_add (io->inbuf, buffer, actual);
+    dbgmsg (io, "on_readable got %zu bytes", actual);
+
+    if (rc < 0) {
+        tr_logAddNamedError ("NEAT", "On read evbuffer_add");
+        return NEAT_OK;
+    }
+
+    tr_peerIoSetEnabled (io, TR_DOWN, true);
+    canReadWrapper (io);
+
+    return NEAT_OK;
+}
+
+static neat_error_code
+on_writable(struct neat_flow_operations *opCB)
+{
+    struct tr_peerIo *io = opCB->userData;
+    assert(tr_isPeerIo(io));
+    const tr_direction dir = TR_UP;
+    int n;
+
+    if ((io->pendingEvents & EV_WRITE) == 0)
+        return NEAT_OK;
+
+    io->pendingEvents &= ~EV_WRITE;
+
+    dbgmsg (io, "NEAT says this peer is ready to write");
+
+    // n = tr_peerIoTryWrite (io, SIZE_MAX);
+    n = tr_peerIoTryWrite (io, 4096);
+    tr_peerIoSetEnabled (io, TR_UP, n && evbuffer_get_length (io->outbuf));
+
+    return NEAT_OK;
+}
+
+void
+tr_setCallbacks(tr_peerIo *io)
+{
+    struct neat_flow_operations *ops = calloc(1, sizeof(*ops));
+
+    ops->on_error = on_error;
+    ops->on_writable = on_writable;
+    ops->on_readable = on_readable;
+    ops->userData = io;
+
+    neat_set_operations(io->session->neat_ctx, io->flow, ops);
+}
+
 static tr_peerIo*
 tr_peerIoNew (tr_session       * session,
               tr_bandwidth     * parent,
@@ -598,9 +688,12 @@ tr_peerIoNew (tr_session       * session,
     assert (tr_isBool (isIncoming));
     assert (tr_isBool (isSeed));
     assert (tr_amInEventThread (session));
+    // OYSTEDAL
+#if 0
     assert ((socket == TR_BAD_SOCKET) == (utp_socket != NULL));
 #ifndef WITH_UTP
     assert (socket != TR_BAD_SOCKET);
+#endif
 #endif
 
     if (socket != TR_BAD_SOCKET) {
@@ -622,6 +715,7 @@ tr_peerIoNew (tr_session       * session,
     io->timeCreated = tr_time ();
     io->inbuf = evbuffer_new ();
     io->outbuf = evbuffer_new ();
+    io->outbuf_datatypes = NULL;
     tr_bandwidthConstruct (&io->bandwidth, session, parent);
     tr_bandwidthSetPeer (&io->bandwidth, io);
     dbgmsg (io, "bandwidth is %p; its parent is %p", (void*)&io->bandwidth, (void*)parent);
@@ -647,8 +741,70 @@ tr_peerIoNew (tr_session       * session,
     }
 #endif
 
+    io->flow = neat_new_flow(session->neat_ctx);
+
+    char addr_buf[INET6_ADDRSTRLEN+1];
+    memset(addr_buf, 0, sizeof(addr_buf));
+    tr_address_to_string_with_buf(addr, addr_buf, sizeof(addr_buf));
+
+    port = htons(port);
+
+    printf("\nConnecting to %s:%d using NEAT\n", addr_buf, port);
+
+#if 1
+static char *props = "{\
+    \"transport\": [\
+        {\
+            \"value\": \"TCP\",\
+            \"precedence\": 2\
+        }\
+    ]\
+}";\
+
+    neat_set_property(session->neat_ctx, io->flow, props);
+#endif
+
+    neat_open(session->neat_ctx, io->flow, addr_buf, port, NULL, 0);
+
     return io;
 }
+
+tr_peerIo*
+tr_peerIoNewIncomingNEAT (tr_session        * session,
+                      tr_bandwidth      * parent,
+                      tr_address *addr,
+                      struct neat_flow *flow)
+{
+    tr_peerIo * io;
+
+    io = tr_new0 (tr_peerIo, 1);
+    io->magicNumber = PEER_IO_MAGIC_NUMBER;
+    io->refCount = 1;
+    tr_cryptoConstruct (&io->crypto, NULL, true);
+    io->session = session;
+    io->flow = flow;
+    memcpy((void*)&io->addr, (void*)addr, sizeof(struct tr_address));
+    // io->isSeed = isSeed; ?
+    io->port = 9999;
+    io->socket = TR_BAD_SOCKET;
+    // io->utp_socket = utp_socket;
+    io->isIncoming = true;
+    io->timeCreated = tr_time ();
+    io->inbuf = evbuffer_new ();
+    io->outbuf = evbuffer_new ();
+    io->outbuf_datatypes = NULL;
+    tr_bandwidthConstruct (&io->bandwidth, session, parent);
+    tr_bandwidthSetPeer (&io->bandwidth, io);
+
+    struct neat_flow_operations* ops = calloc(sizeof(struct neat_flow_operations), 1);
+    ops->userData = io;
+    ops->on_readable = on_readable;
+    ops->on_writable = on_writable;
+    neat_set_operations(session->neat_ctx, flow, ops);
+
+    return io;
+}
+
 
 tr_peerIo*
 tr_peerIoNewIncoming (tr_session        * session,
@@ -658,6 +814,7 @@ tr_peerIoNewIncoming (tr_session        * session,
                       tr_socket_t         fd,
                       struct UTPSocket  * utp_socket)
 {
+    assert(0);
     assert (session);
     assert (tr_address_is_valid (addr));
 
@@ -681,6 +838,7 @@ tr_peerIoNewOutgoing (tr_session        * session,
     assert (tr_address_is_valid (addr));
     assert (torrentHash);
 
+#if 0 // OYSTEDAL
     if (utp)
         utp_socket = tr_netOpenPeerUTPSocket (session, addr, port, isSeed);
 
@@ -691,6 +849,7 @@ tr_peerIoNewOutgoing (tr_session        * session,
 
     if (fd == TR_BAD_SOCKET && utp_socket == NULL)
         return NULL;
+#endif
 
     return tr_peerIoNew (session, parent, addr, port,
                          torrentHash, false, isSeed, fd, utp_socket);
@@ -716,16 +875,20 @@ event_enable (tr_peerIo * io, short event)
     if ((event & EV_READ) && ! (io->pendingEvents & EV_READ))
     {
         dbgmsg (io, "enabling ready-to-read polling");
+#if 0
         if (io->socket != TR_BAD_SOCKET)
             event_add (io->event_read, NULL);
+#endif
         io->pendingEvents |= EV_READ;
     }
 
     if ((event & EV_WRITE) && ! (io->pendingEvents & EV_WRITE))
     {
         dbgmsg (io, "enabling ready-to-write polling");
+#if 0
         if (io->socket != TR_BAD_SOCKET)
             event_add (io->event_write, NULL);
+#endif
         io->pendingEvents |= EV_WRITE;
     }
 }
@@ -826,6 +989,9 @@ io_dtor (void * vio)
     evbuffer_free (io->outbuf);
     evbuffer_free (io->inbuf);
     io_close_socket (io);
+
+    neat_close(io->session->neat_ctx, io->flow);
+
     tr_cryptoDestruct (&io->crypto);
 
     while (io->outbuf_datatypes != NULL)
@@ -838,6 +1004,10 @@ io_dtor (void * vio)
 static void
 tr_peerIoFree (tr_peerIo * io)
 {
+    // TODO: OYSTEDAL:
+    // modify io_dtor to work with NEAT instead.
+    // Disable the callbacks and close the flow.
+#if 1
     if (io)
     {
         dbgmsg (io, "in tr_peerIoFree");
@@ -846,6 +1016,7 @@ tr_peerIoFree (tr_peerIo * io)
         io->gotError = NULL;
         tr_runInEventThread (io->session, io_dtor, io);
     }
+#endif
 }
 
 void
@@ -853,8 +1024,10 @@ tr_peerIoRefImpl (const char * file, int line, tr_peerIo * io)
 {
     assert (tr_isPeerIo (io));
 
+#if 0
     dbgmsg (io, "%s:%d is incrementing the IO's refcount from %d to %d",
                 file, line, io->refCount, io->refCount+1);
+#endif
 
     ++io->refCount;
 }
@@ -864,8 +1037,10 @@ tr_peerIoUnrefImpl (const char * file, int line, tr_peerIo * io)
 {
     assert (tr_isPeerIo (io));
 
+#if 0
     dbgmsg (io, "%s:%d is decrementing the IO's refcount from %d to %d",
                 file, line, io->refCount, io->refCount-1);
+#endif
 
     if (!--io->refCount)
         tr_peerIoFree (io);
@@ -919,6 +1094,7 @@ tr_peerIoClear (tr_peerIo * io)
 int
 tr_peerIoReconnect (tr_peerIo * io)
 {
+#if 0
     short int pendingEvents;
     tr_session * session;
 
@@ -943,6 +1119,7 @@ tr_peerIoReconnect (tr_peerIo * io)
         maybeSetCongestionAlgorithm (io->socket, session->peer_congestion_algorithm);
         return 0;
     }
+#endif
 
     return -1;
 }
@@ -1241,6 +1418,35 @@ tr_peerIoTryRead (tr_peerIo * io, size_t howmuch)
 {
     int res = 0;
 
+    size_t actual = 0;
+
+    // OYSTEDAL: Some arbitrary limit
+    const int limit = 10*4096;
+    if (howmuch > limit)
+        howmuch = limit;
+
+    char *buffer = malloc(howmuch);
+
+    if (buffer == NULL)
+        return 0;
+
+    neat_error_code err = neat_read(io->session->neat_ctx, io->flow, buffer, howmuch, &actual, NULL, 0);
+
+    if (err != NEAT_OK && err != NEAT_ERROR_WOULD_BLOCK) {
+        short what = BEV_EVENT_READING | BEV_EVENT_ERROR;
+        io->gotError (io, what, io->userData);
+
+        neat_close(io->session->neat_ctx, io->flow);
+    } else {
+        evbuffer_add(io->inbuf, buffer, actual);
+
+        if (evbuffer_get_length (io->inbuf))
+            canReadWrapper (io);
+    }
+
+    free(buffer);
+
+#if 0
     if ((howmuch = tr_bandwidthClamp (&io->bandwidth, TR_DOWN, howmuch)))
     {
         if (io->utp_socket != NULL) /* utp peer connection */
@@ -1277,6 +1483,7 @@ tr_peerIoTryRead (tr_peerIo * io, size_t howmuch)
             }
         }
     }
+#endif
 
     return res;
 }
@@ -1291,6 +1498,39 @@ tr_peerIoTryWrite (tr_peerIo * io, size_t howmuch)
     if (howmuch > old_len)
         howmuch = old_len;
 
+    // OYSTEDAL: Some arbitrary limit
+    const int limit = 10*4096;
+    if (howmuch > limit)
+        howmuch = limit;
+
+    char* buffer = malloc(howmuch);
+
+    if (buffer == NULL)
+        return 0;
+
+    evbuffer_copyout(io->outbuf, buffer, howmuch);
+
+    neat_error_code err = neat_write(io->session->neat_ctx, io->flow, (void*)buffer, howmuch, NULL, 0);
+
+    if (err != NEAT_OK) {
+        assert(0);
+        const short what = BEV_EVENT_WRITING | BEV_EVENT_ERROR;
+        if (io->gotError != NULL)
+            io->gotError (io, what, io->userData);
+
+    } else {
+        evbuffer_drain(io->outbuf, howmuch);
+#if 0
+        n = howmuch;
+
+        if (n)
+            didWriteWrapper (io, n);
+#endif
+    }
+
+    free(buffer);
+
+#if 0 // OYSTEDAL
     if ((howmuch = tr_bandwidthClamp (&io->bandwidth, TR_UP, howmuch)))
     {
         if (io->utp_socket != NULL) /* utp peer connection */
@@ -1322,6 +1562,7 @@ tr_peerIoTryWrite (tr_peerIo * io, size_t howmuch)
             }
         }
     }
+#endif
 
     return n;
 }
@@ -1330,6 +1571,9 @@ int
 tr_peerIoFlush (tr_peerIo  * io, tr_direction dir, size_t limit)
 {
     int bytesUsed = 0;
+
+    if (!io->connected)
+        return 0;
 
     assert (tr_isPeerIo (io));
     assert (tr_isDirection (dir));

@@ -220,6 +220,8 @@ struct tr_session
 
     struct tr_bindinfo         * public_ipv4;
     struct tr_bindinfo         * public_ipv6;
+
+    struct neat_ctx * neat_ctx;
 };
 
 static inline tr_port

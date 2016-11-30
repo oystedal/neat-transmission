@@ -67,7 +67,7 @@ enum
 
   /* max number of peers to ask for per second overall.
    * this throttle is to avoid overloading the router */
-  MAX_CONNECTIONS_PER_SECOND = 12,
+  MAX_CONNECTIONS_PER_SECOND = 2,
 
   MAX_CONNECTIONS_PER_PULSE = (int)(MAX_CONNECTIONS_PER_SECOND * (RECONNECT_PERIOD_MSEC/1000.0)),
 
@@ -2108,6 +2108,68 @@ tr_peerMgrAddIncoming (tr_peerMgr       * manager,
 }
 
 void
+tr_peerMgrAddIncomingNEAT (tr_peerMgr* manager, struct neat_flow *flow)
+{
+  tr_session * session;
+  tr_peerIo *io;
+
+  assert (tr_isSession (manager->session));
+
+  managerLock (manager);
+
+  session = manager->session;
+
+  tr_address addr_buf;
+  memset(&addr_buf, 0, sizeof(tr_address));
+  tr_address *addr = &addr_buf;
+
+  size_t len = INET6_ADDRSTRLEN + 1;
+  char buffer[INET6_ADDRSTRLEN + 1];
+  memset(buffer, 0, len);
+
+  neat_get_property(session->neat_ctx, flow, "address", buffer, &len);
+  tr_address_from_string(addr, buffer);
+
+  printf("New connection from \"%s\"\n", buffer);
+  printf("New connection from \"%s\"\n", tr_address_to_string(addr));
+
+  // assert(0);
+
+#if 0
+  if (tr_sessionIsAddressBlocked (session, addr))
+    {
+      tr_logAddDebug ("Banned IP address \"%s\" tried to connect to us", tr_address_to_string (addr));
+      if (socket != TR_BAD_SOCKET)
+        tr_netClose (session, socket);
+      else
+        UTP_Close (utp_socket);
+    }
+  else
+#endif
+      if (getExistingHandshake (&manager->incomingHandshakes, addr))
+    {
+        // neat_close(session->neat_ctx, flow);
+    }
+  else /* we don't have a connection to them yet... */
+    {
+      // io = tr_peerIoNewIncoming (session, &session->bandwidth, addr, port, socket, utp_socket);
+      io = tr_peerIoNewIncomingNEAT (session, &session->bandwidth, addr, flow);
+
+      tr_handshake *handshake = tr_handshakeNew (io,
+                                   session->encryptionMode,
+                                   myHandshakeDoneCB,
+                                   manager);
+
+      tr_peerIoUnref (io); /* balanced by the implicit ref in tr_peerIoNewIncoming () */
+
+      tr_ptrArrayInsertSorted (&manager->incomingHandshakes, handshake,
+                               handshakeCompare);
+    } // from the #if above
+
+  managerUnlock (manager);
+}
+
+void
 tr_peerMgrAddPex (tr_torrent * tor, uint8_t from,
                   const tr_pex * pex, int8_t seedProbability)
 {
@@ -3295,7 +3357,7 @@ getReconnectIntervalSecs (const struct peer_atom * atom, const time_t now)
         }
     }
 
-  dbgmsg ("reconnect interval for %s is %d seconds", tr_atomAddrStr (atom), sec);
+  // dbgmsg ("reconnect interval for %s is %d seconds", tr_atomAddrStr (atom), sec);
   return sec;
 }
 
@@ -4003,6 +4065,87 @@ getPeerCandidates (tr_session * session, int * candidateCount, int max)
   return candidates;
 }
 
+struct connect_data {
+    tr_peerIo * io;
+    tr_peerMgr * mgr;
+    tr_swarm * s;
+    struct peer_atom * atom;
+};
+
+static neat_error_code
+on_connect_error(struct neat_flow_operations *opCB)
+{
+    printf("%s\n", __func__);
+    struct connect_data *data = (struct connect_data*)opCB->userData;
+
+    // OYSTEDAL: This part causes a segmentation fault sometimes
+#if 0
+    tr_peerMgr * mgr = data->mgr;
+    tr_swarm * s = data->s;
+    struct peer_atom * atom = data->atom;
+
+    tordbg (s, "peerIo not created; marking peer %s as unreachable", tr_atomAddrStr (atom));
+    atom->flags2 |= MYFLAG_UNREACHABLE;
+    atom->numFails++;
+#endif
+
+    free(data);
+
+    neat_close(opCB->ctx, opCB->flow);
+
+    return NEAT_OK;
+}
+
+void tr_setCallbacks(tr_peerIo *io);
+
+// Max no. of simultaneous connection attempts
+static int peer_limit = 1;
+
+static neat_error_code
+on_connected(struct neat_flow_operations *opCB)
+{
+    printf("%s\n", __func__);
+    struct connect_data *data = (struct connect_data*)opCB->userData;
+    tr_peerMgr * mgr = data->mgr;
+    tr_swarm * s = data->s;
+    struct peer_atom * atom = data->atom;
+    tr_peerIo * io = data->io;
+
+    io->connected = 1;
+
+    // tordbg (s, "peer %s connected", tr_atomAddrStr (atom));
+    printf ("Connected to %s\n", tr_address_to_string(&atom->addr));
+
+    tr_handshake * handshake = tr_handshakeNew (io,
+            mgr->session->encryptionMode,
+            myHandshakeDoneCB,
+            mgr);
+
+    assert (tr_peerIoGetTorrentHash (io));
+
+    tr_peerIoUnref (io); /* balanced by the initial ref
+                            in tr_peerIoNewOutgoing () */
+
+    tr_ptrArrayInsertSorted (&s->outgoingHandshakes, handshake,
+            handshakeCompare);
+
+    free(data);
+
+    tr_setCallbacks(io);
+
+    peer_limit++;
+
+    return NEAT_OK;
+}
+
+static neat_error_code
+on_close(struct neat_flow_operations *opCB)
+{
+    printf("%s\n", __func__);
+    peer_limit++;
+    return NEAT_OK;
+}
+
 static void
 initiateConnection (tr_peerMgr * mgr, tr_swarm * s, struct peer_atom * atom)
 {
@@ -4019,6 +4162,8 @@ initiateConnection (tr_peerMgr * mgr, tr_swarm * s, struct peer_atom * atom)
   tordbg (s, "Starting an OUTGOING%s connection with %s",
           utp ? " µTP" : "", tr_atomAddrStr (atom));
 
+  printf ("Initiating connection to %s\n", tr_address_to_string(&atom->addr));
+
   io = tr_peerIoNewOutgoing (mgr->session,
                              &mgr->session->bandwidth,
                              &atom->addr,
@@ -4027,6 +4172,23 @@ initiateConnection (tr_peerMgr * mgr, tr_swarm * s, struct peer_atom * atom)
                              s->tor->completeness == TR_SEED,
                              utp);
 
+    struct neat_flow_operations *ops = calloc(1, sizeof(*ops));
+    ops->on_error = on_connect_error;
+    ops->on_connected = on_connected;
+    ops->on_close = on_close;
+
+    struct connect_data *data = calloc(1, sizeof(*data));
+    data->io = io;
+    data->mgr = mgr;
+    data->s = s;
+    data->atom = atom;
+
+    ops->userData = data;
+
+    assert(io->flow);
+    neat_set_operations(mgr->session->neat_ctx, io->flow, ops);
+
+#if 0
   if (io == NULL)
     {
       tordbg (s, "peerIo not created; marking peer %s as unreachable", tr_atomAddrStr (atom));
@@ -4051,6 +4213,7 @@ initiateConnection (tr_peerMgr * mgr, tr_swarm * s, struct peer_atom * atom)
 
   atom->lastConnectionAttemptAt = now;
   atom->time = now;
+#endif
 }
 
 static void
@@ -4065,7 +4228,16 @@ initiateCandidateConnection (tr_peerMgr * mgr, struct peer_candidate * c)
            tr_torrentIsSeed (c->tor) ? "seed" : "downloader");
 #endif
 
+#if 1
+  if (peer_limit)
+      peer_limit--;
+  else
+      return;
+
+  printf("Peer limit is now: %d\n", peer_limit);
+
   initiateConnection (mgr, c->tor->swarm, c->atom);
+#endif
 }
 
 static void

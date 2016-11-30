@@ -149,7 +149,7 @@ struct tr_bindinfo
   struct event * ev;
 };
 
-
+#if 1
 static void
 close_bindinfo (struct tr_bindinfo * b)
 {
@@ -198,31 +198,74 @@ accept_incoming_peer (evutil_socket_t fd, short what UNUSED, void * vsession)
     }
 }
 
+#endif
+
+void
+tr_peerMgrAddIncomingNEAT (tr_peerMgr* manager, struct neat_flow *flow);
+
+static neat_error_code
+on_remote_connect(struct neat_flow_operations *ops)
+{
+    tr_logAddDeep (__FILE__, __LINE__, NULL, "%p\n", ops);
+    tr_logAddDeep (__FILE__, __LINE__, NULL, "%p\n", ops->userData);
+
+#if 1
+    tr_session * session = ops->userData;
+    assert(tr_isSession(session));
+#if 0
+    size_t size = 127;
+    char addrbuf[128];
+    memset(addrbuf, 0, sizeof(addrbuf));
+    neat_get_property(ops->ctx, ops->flow, "address", addrbuf, &size);
+#endif
+
+    tr_logAddDeep (__FILE__, __LINE__, NULL, "new incoming connection\n");
+
+    tr_peerMgrAddIncomingNEAT(session->peerMgr, ops->flow);
+#endif
+    return NEAT_OK;
+}
+
+static neat_error_code
+on_error(struct neat_flow_operations *ops)
+{
+    // assert(0);
+    // neat_close(ops->ctx, ops->flow);
+    return NEAT_OK;
+}
+
 static void
 open_incoming_peer_port (tr_session * session)
 {
-  struct tr_bindinfo * b;
+    assert(tr_isSession(session));
+#if 1
+  // struct tr_bindinfo * b;
+  struct neat_flow *accept_flow = neat_new_flow(session->neat_ctx);
 
-  /* bind an ipv4 port to listen for incoming peers... */
-  b = session->public_ipv4;
-  b->socket = tr_netBindTCP (&b->addr, session->private_peer_port, false);
-  if (b->socket != TR_BAD_SOCKET)
-    {
-      b->ev = event_new (session->event_base, b->socket, EV_READ | EV_PERSIST, accept_incoming_peer, session);
-      event_add (b->ev, NULL);
-    }
+  struct neat_flow_operations *ops = calloc(1, sizeof(struct neat_flow_operations));
 
-  /* and do the exact same thing for ipv6, if it's supported... */
-  if (tr_net_hasIPv6 (session->private_peer_port))
-    {
-      b = session->public_ipv6;
-      b->socket = tr_netBindTCP (&b->addr, session->private_peer_port, false);
-      if (b->socket != TR_BAD_SOCKET)
-        {
-          b->ev = event_new (session->event_base, b->socket, EV_READ | EV_PERSIST, accept_incoming_peer, session);
-          event_add (b->ev, NULL);
-        }
-    }
+  ops->on_connected = on_remote_connect;
+  ops->on_error = on_error;
+  ops->userData = session;
+
+  // tr_logAddDeep (__FILE__, __LINE__, NULL, "%p\n", ops->userData);
+  // sleep(5);
+  neat_set_operations(session->neat_ctx, accept_flow, ops);
+
+static char *props = "{\
+    \"transport\": [\
+        {\
+            \"value\": \"TCP\",\
+            \"precedence\": 2\
+        }\
+    ]\
+}";
+
+  neat_set_property(session->neat_ctx, accept_flow, props);
+  neat_accept(session->neat_ctx, accept_flow, session->private_peer_port, NULL, 0);
+#else
+  (void)session;
+#endif
 }
 
 const tr_address*
@@ -711,6 +754,10 @@ tr_sessionInitImpl (void * vdata)
   tr_logSetQueueEnabled (data->messageQueuingEnabled);
 
   tr_setConfigDir (session, data->configDir);
+
+  session->neat_ctx = neat_init_ctx();
+  neat_log_level(NEAT_LOG_DEBUG);
+  assert(session->neat_ctx);
 
   session->peerMgr = tr_peerMgrNew (session);
 

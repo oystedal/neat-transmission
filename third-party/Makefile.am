@@ -15,6 +15,7 @@ if BUILD_NATPMP
 endif 
 
 SUBDIRS = \
+  libneat \
   $(DHT_DIR) \
   $(B64_DIR) \
   $(NATPMP_DIR) \
